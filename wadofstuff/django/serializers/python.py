@@ -4,10 +4,16 @@ Full Python serializer for Django.
 Applied patch from http://code.google.com/p/wadofstuff/issues/detail?id=4
 by stur...@gmail.com, Apr 7, 2009.
 """
+
+from __future__ import unicode_literals
+
 import base
-from django.utils.encoding import smart_unicode, is_protected_type
-from django.core.serializers.python import Deserializer as PythonDeserializer
+from django.core.serializers import base as rbase
+from django.utils.encoding import smart_unicode, is_protected_type, smart_text
+from django.db import DEFAULT_DB_ALIAS
 from django.db import models
+from django.utils import six
+from django.core.serializers.python import _get_model
 
 class Serializer(base.Serializer):
     """
@@ -216,4 +222,73 @@ class Serializer(base.Serializer):
         else:
             self._fields[fname] = smart_unicode(related, strings_only=True)
 
-Deserializer = PythonDeserializer
+def Deserializer(object_list, **options):
+    """
+    Deserialize simple Python objects back into Django ORM instances.
+
+    It's expected that you pass the Python objects themselves (instead of a
+    stream or a string) to the constructor
+    """
+    db = options.get('using', DEFAULT_DB_ALIAS)
+    ignore = options.get('ignorenonexistent', False)
+
+    models.get_apps()
+    for d in object_list:
+        # Look up the model and starting build a dict of data for it.
+        Model = _get_model(d["model"])
+        data = {Model._meta.pk.attname: Model._meta.pk.to_python(d["pk"])}
+        m2m_data = {}
+        model_fields = Model._meta.get_all_field_names()
+
+        # Handle each field
+        for (field_name, field_value) in six.iteritems(d["fields"]):
+
+            if ignore and field_name not in model_fields:
+                # skip fields no longer on model
+                continue
+
+            if isinstance(field_value, str):
+                field_value = smart_text(field_value, options.get("encoding", settings.DEFAULT_CHARSET), strings_only=True)
+
+            field = Model._meta.get_field(field_name)
+
+            # Handle M2M relations
+            if field.rel and isinstance(field.rel, models.ManyToManyRel):
+                if hasattr(field.rel.to._default_manager, 'get_by_natural_key'):
+                    def m2m_convert(value):
+                        if hasattr(value, '__iter__') and not isinstance(value, six.text_type):
+                            return field.rel.to._default_manager.db_manager(db).get_by_natural_key(*value).pk
+                        else:
+                            return smart_text(field.rel.to._meta.pk.to_python(value))
+                else:
+                    m2m_convert = lambda v: smart_text(field.rel.to._meta.pk.to_python(v))
+                m2m_data[field.name] = [m2m_convert(pk) for pk in field_value]
+
+            # Handle FK fields
+            elif field.rel and isinstance(field.rel, models.ManyToOneRel):
+                if field_value is not None:
+                    if isinstance(field_value, dict):
+                        #handles relations inside a dict
+                        data[field.name] = list(Deserializer([field_value], **options))[0].object
+                    else:
+                        if hasattr(field.rel.to._default_manager, 'get_by_natural_key'):
+                            if hasattr(field_value, '__iter__') and not isinstance(field_value, six.text_type):
+                                obj = field.rel.to._default_manager.db_manager(db).get_by_natural_key(*field_value)
+                                value = getattr(obj, field.rel.field_name)
+                                # If this is a natural foreign key to an object that
+                                # has a FK/O2O as the foreign key, use the FK value
+                                if field.rel.to._meta.pk.rel:
+                                    value = value.pk
+                            else:
+                                value = field.rel.to._meta.get_field(field.rel.field_name).to_python(field_value)
+                            data[field.attname] = value
+                        else:
+                            data[field.attname] = field.rel.to._meta.get_field(field.rel.field_name).to_python(field_value)
+                else:
+                    data[field.attname] = None
+
+            # Handle all other fields
+            else:
+                data[field.name] = field.to_python(field_value)
+
+        yield rbase.DeserializedObject(Model(**data), m2m_data)
