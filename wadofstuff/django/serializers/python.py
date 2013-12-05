@@ -86,32 +86,36 @@ class Serializer(base.Serializer):
         Recursively serializes relations specified in the 'relations' option.
         """
         fname = field.name
-        related = getattr(obj, fname)
-        if related is not None:
-            if fname in self.relations:
-                # perform full serialization of FK
-                serializer = Serializer()
-                options = {}
-                if isinstance(self.relations, dict):
-                    if isinstance(self.relations[fname], dict):
-                        options = self.relations[fname]
-                self._fields[fname] = serializer.serialize([related],
-                    **options)[0]
-            else:
-                # emulate the original behaviour and serialize the pk value
-                if self.use_natural_keys and hasattr(related, 'natural_key'):
-                    related = related.natural_key()
-                else:
-                    if field.rel.field_name == related._meta.pk.name:
-                        # Related to remote object via primary key
-                        related = related._get_pk_val()
-                    else:
-                        # Related to remote object via other field
-                        related = smart_unicode(getattr(related,
-                            field.rel.field_name), strings_only=True)
-                self._fields[fname] = related
+        try:
+            related = getattr(obj, fname)
+        except field.rel.to.DoesNotExist:
+            self._fields[fname] = getattr(obj, field.attname)
         else:
-            self._fields[fname] = smart_unicode(related, strings_only=True)
+            if related is not None:
+                if fname in self.relations or 'all_fks' in self.relations:
+                    # perform full serialization of FK
+                    serializer = Serializer()
+                    options = {}
+                    if isinstance(self.relations, dict):
+                        if isinstance(self.relations[fname], dict):
+                            options = self.relations[fname]
+                    self._fields[fname] = serializer.serialize([related],
+                        **options)[0]
+                else:
+                    # emulate the original behaviour and serialize the pk value
+                    if self.use_natural_keys and hasattr(related, 'natural_key'):
+                        related = related.natural_key()
+                    else:
+                        if field.rel.field_name == related._meta.pk.name:
+                            # Related to remote object via primary key
+                            related = related._get_pk_val()
+                        else:
+                            # Related to remote object via other field
+                            related = smart_unicode(getattr(related,
+                                field.rel.field_name), strings_only=True)
+                    self._fields[fname] = related
+            else:
+                self._fields[fname] = smart_unicode(related, strings_only=True)
 
     def handle_m2m_field(self, obj, field):
         """
@@ -147,7 +151,7 @@ class Serializer(base.Serializer):
         not seekable).
         """
         return self.objects
-    
+
     def handle_extra_field(self, obj, field):
         """
         Return "extra" fields that the user specifies.
